@@ -1,188 +1,323 @@
 #!/usr/bin/env python3
 
 import json
-import os
-from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
 
 
-INPUT_DIR = "./output"
-OUTPUT_FILE = "./output/EntraID_Application_Assessment.xlsx"
+OUTPUT_DIR = "./output"
+
+OUTPUT_FILE = (
+    f"{OUTPUT_DIR}/EntraID_Application_Assessment.xlsx"
+)
 
 
 def load_json(filename):
-    file_path = os.path.join(INPUT_DIR, filename)
-
-    if not os.path.exists(file_path):
-        print(f"[WARN] No existe {filename}")
-        return []
 
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+
+        with open(
+            f"{OUTPUT_DIR}/{filename}",
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             return json.load(f)
-    except Exception as ex:
-        print(f"[ERROR] {filename}: {ex}")
+
+    except Exception:
+
         return []
 
 
-def create_dataframe(data):
+def df(data):
+
     if not data:
         return pd.DataFrame()
 
     if isinstance(data, dict):
-        data = [data]
+        return pd.DataFrame([data])
 
     return pd.DataFrame(data)
 
 
-def autosize_columns(writer, sheet_name, dataframe):
+def worksheet_autosize(writer, sheet_name, dataframe):
+
     worksheet = writer.sheets[sheet_name]
 
-    for idx, column in enumerate(dataframe.columns):
-        max_length = max(
-            dataframe[column].astype(str).map(len).max(),
-            len(column)
+    for idx, col in enumerate(dataframe.columns):
+
+        width = max(
+            dataframe[col]
+            .astype(str)
+            .str.len()
+            .max(),
+            len(col)
         )
 
-        worksheet.set_column(idx, idx, min(max_length + 5, 80))
+        width = min(width + 4, 80)
+
+        worksheet.set_column(idx, idx, width)
 
 
-def create_summary_sheet(writer, stats):
-    summary_df = pd.DataFrame(stats)
-
-    summary_df.to_excel(
+def write_table(
         writer,
-        sheet_name="Executive_Summary",
+        sheet_name,
+        dataframe,
+        header_format):
+
+    dataframe.to_excel(
+        writer,
+        sheet_name=sheet_name,
         index=False
     )
 
-    worksheet = writer.sheets["Executive_Summary"]
+    worksheet = writer.sheets[sheet_name]
 
-    worksheet.set_column("A:A", 40)
-    worksheet.set_column("B:B", 20)
-
-
-def calculate_summary(
-    applications,
-    owners,
-    secrets,
-    certificates,
-    findings,
-    enterprise_apps
-):
-
-    total_apps = len(applications)
-
-    apps_with_owner = len(
-        set(
-            x.get("ApplicationId")
-            for x in owners
-            if x.get("ApplicationId")
+    for c, value in enumerate(dataframe.columns):
+        worksheet.write(
+            0,
+            c,
+            value,
+            header_format
         )
-    )
 
-    apps_without_owner = max(
-        total_apps - apps_with_owner,
-        0
-    )
+    if len(dataframe.columns) > 0:
 
-    expired_secrets = sum(
-        1 for s in secrets
-        if str(s.get("Status", "")).lower() == "expired"
-    )
+        worksheet.autofilter(
+            0,
+            0,
+            max(len(dataframe), 1),
+            len(dataframe.columns) - 1
+        )
 
-    expiring_secrets = sum(
-        1 for s in secrets
-        if str(s.get("Status", "")).lower() in [
-            "warning",
-            "expiring"
+        worksheet.freeze_panes(1, 0)
+
+        worksheet_autosize(
+            writer,
+            sheet_name,
+            dataframe
+        )
+
+
+def build_summary(
+        applications,
+        enterprise,
+        secrets,
+        certs,
+        redirects,
+        findings):
+
+    return pd.DataFrame(
+        [
+            {
+                "Metric":
+                "Report Date",
+
+                "Value":
+                datetime.now()
+                .strftime("%Y-%m-%d %H:%M")
+            },
+
+            {
+                "Metric":
+                "Applications",
+
+                "Value":
+                len(applications)
+            },
+
+            {
+                "Metric":
+                "Enterprise Applications",
+
+                "Value":
+                len(enterprise)
+            },
+
+            {
+                "Metric":
+                "Secrets",
+
+                "Value":
+                len(secrets)
+            },
+
+            {
+                "Metric":
+                "Expired Secrets",
+
+                "Value":
+                len([
+                    x
+                    for x in secrets
+                    if x.get("Status") == "EXPIRED"
+                ])
+            },
+
+            {
+                "Metric":
+                "Secrets < 90 days",
+
+                "Value":
+                len([
+                    x
+                    for x in secrets
+                    if x.get("Status")
+                    == "EXPIRING_SOON"
+                ])
+            },
+
+            {
+                "Metric":
+                "Certificates",
+
+                "Value":
+                len(certs)
+            },
+
+            {
+                "Metric":
+                "Certificates < 90 days",
+
+                "Value":
+                len([
+                    x
+                    for x in certs
+                    if x.get("Status")
+                    == "EXPIRING_SOON"
+                ])
+            },
+
+            {
+                "Metric":
+                "Redirect URIs",
+
+                "Value":
+                len(redirects)
+            },
+
+            {
+                "Metric":
+                "High Risk Redirect URIs",
+
+                "Value":
+                len([
+                    x
+                    for x in redirects
+                    if x.get("Risk")
+                    == "HIGH"
+                ])
+            },
+
+            {
+                "Metric":
+                "Findings",
+
+                "Value":
+                len(findings)
+            },
+
+            {
+                "Metric":
+                "Critical Findings",
+
+                "Value":
+                len([
+                    x
+                    for x in findings
+                    if x.get("Severity")
+                    == "CRITICAL"
+                ])
+            },
+
+            {
+                "Metric":
+                "High Findings",
+
+                "Value":
+                len([
+                    x
+                    for x in findings
+                    if x.get("Severity")
+                    == "HIGH"
+                ])
+            }
         ]
     )
 
-    expired_certs = sum(
-        1 for c in certificates
-        if str(c.get("Status", "")).lower() == "expired"
+
+def build_top_risky(findings):
+
+    if not findings:
+
+        return pd.DataFrame()
+
+    df_findings = pd.DataFrame(findings)
+
+    top = (
+        df_findings
+        .groupby("Application")
+        .size()
+        .reset_index(name="Findings")
+        .sort_values(
+            "Findings",
+            ascending=False
+        )
     )
 
-    critical_findings = sum(
-        1 for x in findings
-        if str(x.get("Severity", "")).upper() == "CRITICAL"
-    )
-
-    high_findings = sum(
-        1 for x in findings
-        if str(x.get("Severity", "")).upper() == "HIGH"
-    )
-
-    return [
-        {
-            "Metric": "Report generated",
-            "Value": datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-        },
-        {
-            "Metric": "Registered Applications",
-            "Value": total_apps
-        },
-        {
-            "Metric": "Enterprise Applications",
-            "Value": len(enterprise_apps)
-        },
-        {
-            "Metric": "Applications without owner",
-            "Value": apps_without_owner
-        },
-        {
-            "Metric": "Expired secrets",
-            "Value": expired_secrets
-        },
-        {
-            "Metric": "Secrets expiring soon",
-            "Value": expiring_secrets
-        },
-        {
-            "Metric": "Expired certificates",
-            "Value": expired_certs
-        },
-        {
-            "Metric": "Critical findings",
-            "Value": critical_findings
-        },
-        {
-            "Metric": "High findings",
-            "Value": high_findings
-        }
-    ]
+    return top.head(25)
 
 
 def main():
 
-    applications = load_json("applications.json")
-    owners = load_json("owners.json")
-    permissions = load_json("permissions.json")
-    consent_grants = load_json("consent_grants.json")
-    redirect_uris = load_json("redirect_uris.json")
-    secrets = load_json("secrets.json")
-    certificates = load_json("certificates.json")
-    enterprise_apps = load_json("enterprise_apps.json")
-    federation = load_json("federation.json")
-    findings = load_json("findings.json")
-
-    summary = calculate_summary(
-        applications,
-        owners,
-        secrets,
-        certificates,
-        findings,
-        enterprise_apps
+    applications = load_json(
+        "applications.json"
     )
 
-    Path(INPUT_DIR).mkdir(
-        parents=True,
-        exist_ok=True
+    owners = load_json(
+        "owners.json"
+    )
+
+    secrets = load_json(
+        "secrets.json"
+    )
+
+    certificates = load_json(
+        "certificates.json"
+    )
+
+    permissions = load_json(
+        "permissions.json"
+    )
+
+    permissions_enriched = load_json(
+        "permissions_enriched.json"
+    )
+
+    redirects = load_json(
+        "redirect_uris.json"
+    )
+
+    enterprise = load_json(
+        "enterprise_apps.json"
+    )
+
+    findings = load_json(
+        "findings.json"
+    )
+
+    summary_df = build_summary(
+        applications,
+        enterprise,
+        secrets,
+        certificates,
+        redirects,
+        findings
+    )
+
+    top_df = build_top_risky(
+        findings
     )
 
     with pd.ExcelWriter(
@@ -192,99 +327,166 @@ def main():
 
         workbook = writer.book
 
-        header_format = workbook.add_format(
+        header_format = (
+            workbook.add_format(
+                {
+                    "bold": True,
+                    "bg_color": "#1F497D",
+                    "font_color": "white",
+                    "border": 1
+                }
+            )
+        )
+
+        red = workbook.add_format(
             {
-                "bold": True,
-                "bg_color": "#1F4E78",
-                "font_color": "white",
-                "border": 1
+                "bg_color": "#FFC7CE"
             }
         )
 
-        sheets = {
-            "Applications": applications,
-            "Owners": owners,
-            "API_Permissions": permissions,
-            "Consent_Grants": consent_grants,
-            "Redirect_URIs": redirect_uris,
-            "Secrets": secrets,
-            "Certificates": certificates,
-            "Enterprise_Applications": enterprise_apps,
-            "Federation": federation,
-            "Findings": findings
-        }
-
-        summary_df = pd.DataFrame(summary)
-
-        summary_df.to_excel(
-            writer,
-            sheet_name="Executive_Summary",
-            index=False
+        orange = workbook.add_format(
+            {
+                "bg_color": "#FFEB9C"
+            }
         )
 
-        summary_ws = writer.sheets[
-            "Executive_Summary"
+        write_table(
+            writer,
+            "Executive_Summary",
+            summary_df,
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Top_Riskiest_Applications",
+            top_df,
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Applications",
+            df(applications),
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Owners",
+            df(owners),
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Secrets",
+            df(secrets),
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Certificates",
+            df(certificates),
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Permissions",
+            df(permissions),
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Permissions_Enriched",
+            df(permissions_enriched),
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Redirect_URIs",
+            df(redirects),
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Enterprise_Apps",
+            df(enterprise),
+            header_format
+        )
+
+        write_table(
+            writer,
+            "Findings",
+            df(findings),
+            header_format
+        )
+
+        findings_ws = writer.sheets[
+            "Findings"
         ]
 
-        for col_num, value in enumerate(
-            summary_df.columns
-        ):
-            summary_ws.write(
-                0,
-                col_num,
-                value,
-                header_format
+        if findings:
+
+            findings_df = pd.DataFrame(
+                findings
             )
 
-        summary_ws.set_column("A:A", 45)
-        summary_ws.set_column("B:B", 25)
-
-        for sheet_name, data in sheets.items():
-
-            df = create_dataframe(data)
-
-            df.to_excel(
-                writer,
-                sheet_name=sheet_name,
-                index=False
+            severity_col = (
+                findings_df.columns
+                .get_loc("Severity")
             )
 
-            worksheet = writer.sheets[
-                sheet_name
-            ]
+            findings_ws.conditional_format(
+                1,
+                severity_col,
+                len(findings_df),
+                severity_col,
+                {
+                    "type": "text",
+                    "criteria":
+                    "containing",
+                    "value":
+                    "CRITICAL",
+                    "format":
+                    red
+                }
+            )
 
-            for col_num, value in enumerate(
-                df.columns.values
-            ):
-                worksheet.write(
-                    0,
-                    col_num,
-                    value,
-                    header_format
-                )
+            findings_ws.conditional_format(
+                1,
+                severity_col,
+                len(findings_df),
+                severity_col,
+                {
+                    "type": "text",
+                    "criteria":
+                    "containing",
+                    "value":
+                    "HIGH",
+                    "format":
+                    orange
+                }
+            )
 
-            if len(df) > 0:
-                worksheet.autofilter(
-                    0,
-                    0,
-                    len(df),
-                    len(df.columns) - 1
-                )
-
-                worksheet.freeze_panes(1, 0)
-
-                autosize_columns(
-                    writer,
-                    sheet_name,
-                    df
-                )
-
-        print("")
-        print("=" * 60)
-        print("Entra ID Assessment generado")
-        print("=" * 60)
-        print(OUTPUT_FILE)
-        print("")
+    print()
+    print(
+        "========================================="
+    )
+    print(
+        " ENTRA ID ASSESSMENT GENERADO"
+    )
+    print(
+        "========================================="
+    )
+    print()
+    print(OUTPUT_FILE)
+    print()
 
 
 if __name__ == "__main__":
