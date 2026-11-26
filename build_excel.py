@@ -1,492 +1,181 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
-
-OUTPUT_DIR = "./output"
-
-OUTPUT_FILE = (
-    f"{OUTPUT_DIR}/EntraID_Application_Assessment.xlsx"
-)
+SEVERITY_COLORS = {
+    "CRITICAL": "#FFC7CE",
+    "HIGH": "#FFEB9C",
+}
 
 
-def load_json(filename):
+def load_json(path: Path):
+    if not path.is_file():
+        print(f"[WARN] No existe {path}; se usará una colección vacía.", file=sys.stderr)
+        return []
 
     try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON inválido en {path}: {exc}") from exc
 
-        with open(
-            f"{OUTPUT_DIR}/{filename}",
-            "r",
-            encoding="utf-8"
-        ) as f:
+    if not isinstance(data, (list, dict)):
+        raise TypeError(f"Formato inesperado en {path}: se esperaba lista o diccionario")
 
-            return json.load(f)
-
-    except Exception:
-
-        return []
+    return data
 
 
 def df(data):
-
     if not data:
         return pd.DataFrame()
-
     if isinstance(data, dict):
         return pd.DataFrame([data])
-
+    if not isinstance(data, list):
+        raise TypeError("Los datos JSON detallados deben ser una lista")
     return pd.DataFrame(data)
 
 
 def worksheet_autosize(writer, sheet_name, dataframe):
+    worksheet = writer.sheets[sheet_name]
+    for idx, column in enumerate(dataframe.columns):
+        values = dataframe[column].fillna("").astype(str)
+        width = max(len(str(column)), values.str.len().max() if len(values) else 0)
+        worksheet.set_column(idx, idx, min(width + 4, 80))
 
+
+def write_table(writer, sheet_name, dataframe, header_format):
+    dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
     worksheet = writer.sheets[sheet_name]
 
-    for idx, col in enumerate(dataframe.columns):
+    for index, value in enumerate(dataframe.columns):
+        worksheet.write(0, index, value, header_format)
 
-        width = max(
-            dataframe[col]
-            .astype(str)
-            .str.len()
-            .max(),
-            len(col)
-        )
-
-        width = min(width + 4, 80)
-
-        worksheet.set_column(idx, idx, width)
-
-
-def write_table(
-        writer,
-        sheet_name,
-        dataframe,
-        header_format):
-
-    dataframe.to_excel(
-        writer,
-        sheet_name=sheet_name,
-        index=False
-    )
-
-    worksheet = writer.sheets[sheet_name]
-
-    for c, value in enumerate(dataframe.columns):
-        worksheet.write(
-            0,
-            c,
-            value,
-            header_format
-        )
-
-    if len(dataframe.columns) > 0:
-
-        worksheet.autofilter(
-            0,
-            0,
-            max(len(dataframe), 1),
-            len(dataframe.columns) - 1
-        )
-
+    if len(dataframe.columns):
+        worksheet.autofilter(0, 0, max(len(dataframe), 1), len(dataframe.columns) - 1)
         worksheet.freeze_panes(1, 0)
-
-        worksheet_autosize(
-            writer,
-            sheet_name,
-            dataframe
-        )
+        worksheet_autosize(writer, sheet_name, dataframe)
 
 
-def build_summary(
-        applications,
-        enterprise,
-        secrets,
-        certs,
-        redirects,
-        findings):
+def count_status(records, status):
+    return sum(isinstance(record, dict) and record.get("Status") == status for record in records)
 
-    return pd.DataFrame(
-        [
-            {
-                "Metric":
-                "Report Date",
 
-                "Value":
-                datetime.now()
-                .strftime("%Y-%m-%d %H:%M")
-            },
+def count_field(records, field, value):
+    return sum(isinstance(record, dict) and record.get(field) == value for record in records)
 
-            {
-                "Metric":
-                "Applications",
 
-                "Value":
-                len(applications)
-            },
-
-            {
-                "Metric":
-                "Enterprise Applications",
-
-                "Value":
-                len(enterprise)
-            },
-
-            {
-                "Metric":
-                "Secrets",
-
-                "Value":
-                len(secrets)
-            },
-
-            {
-                "Metric":
-                "Expired Secrets",
-
-                "Value":
-                len([
-                    x
-                    for x in secrets
-                    if x.get("Status") == "EXPIRED"
-                ])
-            },
-
-            {
-                "Metric":
-                "Secrets < 90 days",
-
-                "Value":
-                len([
-                    x
-                    for x in secrets
-                    if x.get("Status")
-                    == "EXPIRING_SOON"
-                ])
-            },
-
-            {
-                "Metric":
-                "Certificates",
-
-                "Value":
-                len(certs)
-            },
-
-            {
-                "Metric":
-                "Certificates < 90 days",
-
-                "Value":
-                len([
-                    x
-                    for x in certs
-                    if x.get("Status")
-                    == "EXPIRING_SOON"
-                ])
-            },
-
-            {
-                "Metric":
-                "Redirect URIs",
-
-                "Value":
-                len(redirects)
-            },
-
-            {
-                "Metric":
-                "High Risk Redirect URIs",
-
-                "Value":
-                len([
-                    x
-                    for x in redirects
-                    if x.get("Risk")
-                    == "HIGH"
-                ])
-            },
-
-            {
-                "Metric":
-                "Findings",
-
-                "Value":
-                len(findings)
-            },
-
-            {
-                "Metric":
-                "Critical Findings",
-
-                "Value":
-                len([
-                    x
-                    for x in findings
-                    if x.get("Severity")
-                    == "CRITICAL"
-                ])
-            },
-
-            {
-                "Metric":
-                "High Findings",
-
-                "Value":
-                len([
-                    x
-                    for x in findings
-                    if x.get("Severity")
-                    == "HIGH"
-                ])
-            }
-        ]
-    )
+def build_summary(applications, enterprise, secrets, certificates, redirects, findings):
+    return pd.DataFrame([
+        {"Metric": "Report Date", "Value": datetime.now().strftime("%Y-%m-%d %H:%M")},
+        {"Metric": "Applications", "Value": len(applications)},
+        {"Metric": "Enterprise Applications", "Value": len(enterprise)},
+        {"Metric": "Secrets", "Value": len(secrets)},
+        {"Metric": "Expired Secrets", "Value": count_status(secrets, "EXPIRED")},
+        {"Metric": "Secrets < 90 days", "Value": count_status(secrets, "EXPIRING_SOON")},
+        {"Metric": "Certificates", "Value": len(certificates)},
+        {"Metric": "Certificates < 90 days", "Value": count_status(certificates, "EXPIRING_SOON")},
+        {"Metric": "Redirect URIs", "Value": len(redirects)},
+        {"Metric": "High Risk Redirect URIs", "Value": count_field(redirects, "Risk", "HIGH")},
+        {"Metric": "Findings", "Value": len(findings)},
+        {"Metric": "Critical Findings", "Value": count_field(findings, "Severity", "CRITICAL")},
+        {"Metric": "High Findings", "Value": count_field(findings, "Severity", "HIGH")},
+    ])
 
 
 def build_top_risky(findings):
-
     if not findings:
+        return pd.DataFrame(columns=["Application", "Critical", "High", "Medium", "Risk_Score", "Findings"])
 
-        return pd.DataFrame()
+    frame = pd.DataFrame(findings)
+    if "Application" not in frame.columns or "Severity" not in frame.columns:
+        return pd.DataFrame(columns=["Application", "Critical", "High", "Medium", "Risk_Score", "Findings"])
 
-    df_findings = pd.DataFrame(findings)
-
-    top = (
-        df_findings
-        .groupby("Application")
-        .size()
-        .reset_index(name="Findings")
-        .sort_values(
-            "Findings",
-            ascending=False
-        )
+    frame["Application"] = frame["Application"].fillna("UNKNOWN")
+    weighted = frame.assign(
+        Critical=(frame["Severity"] == "CRITICAL").astype(int) * 10,
+        High=(frame["Severity"] == "HIGH").astype(int) * 5,
+        Medium=(frame["Severity"] == "MEDIUM").astype(int) * 2,
     )
 
-    return top.head(25)
+    top = weighted.groupby("Application", dropna=False).agg(
+        Critical=("Critical", "sum"),
+        High=("High", "sum"),
+        Medium=("Medium", "sum"),
+        Findings=("Severity", "count"),
+    ).reset_index()
+    top["Risk_Score"] = top["Critical"] + top["High"] + top["Medium"]
+    return top.sort_values(["Risk_Score", "Findings"], ascending=False).head(25)
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Genera el informe Excel de Entra ID")
+    parser.add_argument("--output-dir", default="./output")
+    args = parser.parse_args()
 
-    applications = load_json(
-        "applications.json"
-    )
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / "EntraID_Application_Assessment.xlsx"
 
-    owners = load_json(
-        "owners.json"
-    )
+    applications = load_json(output_dir / "applications.json")
+    owners = load_json(output_dir / "owners.json")
+    secrets = load_json(output_dir / "secrets.json")
+    certificates = load_json(output_dir / "certificates.json")
+    permissions = load_json(output_dir / "permissions.json")
+    permissions_enriched = load_json(output_dir / "permissions_enriched.json")
+    redirects = load_json(output_dir / "redirect_uris.json")
+    enterprise = load_json(output_dir / "enterprise_apps.json")
+    findings = load_json(output_dir / "findings.json")
 
-    secrets = load_json(
-        "secrets.json"
-    )
+    summary = build_summary(applications, enterprise, secrets, certificates, redirects, findings)
+    top_risky = build_top_risky(findings)
 
-    certificates = load_json(
-        "certificates.json"
-    )
+    sheets = {
+        "Executive_Summary": summary,
+        "Top_Riskiest_Applications": top_risky,
+        "Applications": df(applications),
+        "Owners": df(owners),
+        "Secrets": df(secrets),
+        "Certificates": df(certificates),
+        "Permissions": df(permissions),
+        "Permissions_Enriched": df(permissions_enriched),
+        "Redirect_URIs": df(redirects),
+        "Enterprise_Apps": df(enterprise),
+        "Findings": df(findings),
+    }
 
-    permissions = load_json(
-        "permissions.json"
-    )
-
-    permissions_enriched = load_json(
-        "permissions_enriched.json"
-    )
-
-    redirects = load_json(
-        "redirect_uris.json"
-    )
-
-    enterprise = load_json(
-        "enterprise_apps.json"
-    )
-
-    findings = load_json(
-        "findings.json"
-    )
-
-    summary_df = build_summary(
-        applications,
-        enterprise,
-        secrets,
-        certificates,
-        redirects,
-        findings
-    )
-
-    top_df = build_top_risky(
-        findings
-    )
-
-    with pd.ExcelWriter(
-        OUTPUT_FILE,
-        engine="xlsxwriter"
-    ) as writer:
-
+    with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
         workbook = writer.book
+        header_format = workbook.add_format({"bold": True, "bg_color": "#1F497D", "font_color": "white", "border": 1})
 
-        header_format = (
-            workbook.add_format(
-                {
-                    "bold": True,
-                    "bg_color": "#1F497D",
-                    "font_color": "white",
-                    "border": 1
-                }
-            )
-        )
+        for sheet_name, dataframe in sheets.items():
+            write_table(writer, sheet_name, dataframe, header_format)
 
-        red = workbook.add_format(
-            {
-                "bg_color": "#FFC7CE"
-            }
-        )
+        findings_frame = sheets["Findings"]
+        if not findings_frame.empty and "Severity" in findings_frame.columns:
+            worksheet = writer.sheets["Findings"]
+            severity_column = findings_frame.columns.get_loc("Severity")
 
-        orange = workbook.add_format(
-            {
-                "bg_color": "#FFEB9C"
-            }
-        )
+            for severity, color in SEVERITY_COLORS.items():
+                worksheet.conditional_format(
+                    1,
+                    severity_column,
+                    len(findings_frame),
+                    severity_column,
+                    {
+                        "type": "text",
+                        "criteria": "containing",
+                        "value": severity,
+                        "format": workbook.add_format({"bg_color": color}),
+                    },
+                )
 
-        write_table(
-            writer,
-            "Executive_Summary",
-            summary_df,
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Top_Riskiest_Applications",
-            top_df,
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Applications",
-            df(applications),
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Owners",
-            df(owners),
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Secrets",
-            df(secrets),
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Certificates",
-            df(certificates),
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Permissions",
-            df(permissions),
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Permissions_Enriched",
-            df(permissions_enriched),
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Redirect_URIs",
-            df(redirects),
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Enterprise_Apps",
-            df(enterprise),
-            header_format
-        )
-
-        write_table(
-            writer,
-            "Findings",
-            df(findings),
-            header_format
-        )
-
-        findings_ws = writer.sheets[
-            "Findings"
-        ]
-
-        if findings:
-
-            findings_df = pd.DataFrame(
-                findings
-            )
-
-            severity_col = (
-                findings_df.columns
-                .get_loc("Severity")
-            )
-
-            findings_ws.conditional_format(
-                1,
-                severity_col,
-                len(findings_df),
-                severity_col,
-                {
-                    "type": "text",
-                    "criteria":
-                    "containing",
-                    "value":
-                    "CRITICAL",
-                    "format":
-                    red
-                }
-            )
-
-            findings_ws.conditional_format(
-                1,
-                severity_col,
-                len(findings_df),
-                severity_col,
-                {
-                    "type": "text",
-                    "criteria":
-                    "containing",
-                    "value":
-                    "HIGH",
-                    "format":
-                    orange
-                }
-            )
-
-    print()
-    print(
-        "========================================="
-    )
-    print(
-        " ENTRA ID ASSESSMENT GENERADO"
-    )
-    print(
-        "========================================="
-    )
-    print()
-    print(OUTPUT_FILE)
-    print()
+    print(output_file)
 
 
 if __name__ == "__main__":

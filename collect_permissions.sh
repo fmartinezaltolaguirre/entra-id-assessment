@@ -1,117 +1,61 @@
 #!/bin/bash
 
-set -euo pipefail
+set -Eeuo pipefail
 
-OUTDIR="./output"
+OUTDIR="${OUTDIR:-./output}"
+APPS_FILE="$OUTDIR/applications.json"
+PERMISSIONS_FILE="$OUTDIR/permissions.json"
 
-APPS_FILE="${OUTDIR}/applications.json"
-PERMISSIONS_FILE="${OUTDIR}/permissions.json"
-
-if [ ! -f "${APPS_FILE}" ]; then
-    echo "[ERROR] No existe ${APPS_FILE}"
+if [[ ! -f "$APPS_FILE" ]]; then
+    echo "[ERROR] No existe $APPS_FILE" >&2
     exit 1
 fi
 
-TMP=$(mktemp)
+jq -e 'type == "array"' "$APPS_FILE" >/dev/null
 
-echo "[]" > "${TMP}"
-
-TOTAL=$(jq length "${APPS_FILE}")
-
-CURRENT=0
-
-echo
-echo "========================================="
-echo " ENTRA ID - RECOLECCIÓN DE PERMISOS API"
-echo "========================================="
-echo
-echo "[INFO] Aplicaciones encontradas: ${TOTAL}"
-echo
-
-jq -c '.[]' "${APPS_FILE}" |
-while read -r APP
-do
-
-    CURRENT=$((CURRENT + 1))
-
-    APP_NAME=$(echo "${APP}" | jq -r '.displayName // "UNKNOWN"')
-    APP_ID=$(echo "${APP}" | jq -r '.appId')
-    APP_OBJECT_ID=$(echo "${APP}" | jq -r '.id')
-
-    printf "[%03d/%03d] %s\n" \
-        "${CURRENT}" \
-        "${TOTAL}" \
-        "${APP_NAME}"
-
-    echo "${APP}" |
-    jq \
-        --arg app "$APP_NAME" \
-        --arg appid "$APP_ID" \
-        --arg objectid "$APP_OBJECT_ID" '
-        [
-          .requiredResourceAccess[]? as $resource
-          |
-          $resource.resourceAccess[]?
-          |
-          {
-            ApplicationName: $app,
-            ApplicationId: $appid,
-            ApplicationObjectId: $objectid,
-            ResourceAppId: $resource.resourceAppId,
-            PermissionId: .id,
-            PermissionType: .type
-          }
-        ]
-        ' \
-        > /tmp/permissions_part.json
-
-    jq -s 'add' \
-        "${TMP}" \
-        /tmp/permissions_part.json \
-        > /tmp/permissions_merge.json
-
-    mv /tmp/permissions_merge.json "${TMP}"
-
-done
-
-cp "${TMP}" "${PERMISSIONS_FILE}"
-
-echo
-echo "[INFO] Clasificando riesgos..."
+TMP_FILE=$(mktemp "$OUTDIR/permissions.XXXXXX.json")
+trap 'rm -f "$TMP_FILE"' EXIT
 
 jq '
-map(
-    . +
-    {
-      RiskLevel:
-      (
-        if .PermissionType == "Role"
-        then "HIGH"
-        elif .PermissionType == "Scope"
-        then "MEDIUM"
-        else "UNKNOWN"
-        end
-      )
+[
+  .[]
+  | . as $app
+  | ($app.displayName // "UNKNOWN") as $name
+  | ($app.appId // "") as $app_id
+  | ($app.id // "") as $object_id
+  | .requiredResourceAccess[]?
+  | . as $resource
+  | $resource.resourceAccess[]?
+  | {
+      ApplicationName: $name,
+      ApplicationId: $app_id,
+      ApplicationObjectId: $object_id,
+      ResourceAppId: ($resource.resourceAppId // ""),
+      PermissionId: (.id // ""),
+      PermissionType: (.type // "UNKNOWN")
     }
-)
-' "${PERMISSIONS_FILE}" \
-> /tmp/permissions_final.json
+]
+| map(. + {
+    RiskLevel: (
+      if .PermissionType == "Role" then "HIGH"
+      elif .PermissionType == "Scope" then "MEDIUM"
+      else "UNKNOWN"
+      end
+    )
+  })
+' "$APPS_FILE" > "$TMP_FILE"
 
-mv /tmp/permissions_final.json "${PERMISSIONS_FILE}"
+mv "$TMP_FILE" "$PERMISSIONS_FILE"
+trap - EXIT
 
-TOTAL_PERMISSIONS=$(jq length "${PERMISSIONS_FILE}")
+TOTAL_PERMISSIONS=$(jq 'length' "$PERMISSIONS_FILE")
+HIGH=$(jq '[.[] | select(.RiskLevel == "HIGH")] | length' "$PERMISSIONS_FILE")
+MEDIUM=$(jq '[.[] | select(.RiskLevel == "MEDIUM")] | length' "$PERMISSIONS_FILE")
 
-HIGH=$(jq '[.[] | select(.RiskLevel=="HIGH")] | length' "${PERMISSIONS_FILE}")
-
-MEDIUM=$(jq '[.[] | select(.RiskLevel=="MEDIUM")] | length' "${PERMISSIONS_FILE}")
-
-echo
-echo "========================================="
-echo " RESUMEN"
-echo "========================================="
-echo "[OK] Permisos encontrados : ${TOTAL_PERMISSIONS}"
-echo "[OK] Riesgo HIGH         : ${HIGH}"
-echo "[OK] Riesgo MEDIUM       : ${MEDIUM}"
-echo "[OK] Fichero             : ${PERMISSIONS_FILE}"
-echo
-
+printf '\n=========================================\n'
+printf ' ENTRA ID - RECOLECCIÓN DE PERMISOS API\n'
+printf '=========================================\n'
+printf '[OK] Permisos encontrados: %s\n' "$TOTAL_PERMISSIONS"
+printf '[OK] Riesgo HIGH: %s\n' "$HIGH"
+printf '[OK] Riesgo MEDIUM: %s\n' "$MEDIUM"
+printf '[OK] Fichero: %s\n' "$PERMISSIONS_FILE"
